@@ -1,0 +1,474 @@
+/**
+ * ============================================================
+ *  DASHBOARD DE EMISSÕES — Google Planilhas
+ * ============================================================
+ *  Como usar (resumo):
+ *   1. Crie uma planilha em branco no Google Planilhas.
+ *   2. Extensões > Apps Script > cole este arquivo inteiro > Salvar.
+ *   3. Execute a função  criarDashboard  (autorize quando pedir).
+ *   4. Na aba BASE, cole a planilha do sistema (a partir da A1).
+ *
+ *  Rotina diária:
+ *   Menu "📦 Emissões" > Limpar BASE > cole a nova planilha na A1.
+ *
+ *  Abas criadas:
+ *   DASH      painel: filtros + indicadores + gráficos + detalhamento
+ *   DESTINOS  prazo e volume por destino (respeita os filtros da DASH)
+ *   BASE      onde você cola a planilha do sistema
+ *   COMO USAR instruções rápidas
+ *   DADOS     camada de tratamento (fórmulas) — não mexer
+ *   CALC      tabelas que alimentam os gráficos — não mexer
+ *   LISTAS    opções dos filtros — não mexer
+ * ============================================================
+ */
+
+const LAST = 5001;        // última linha da BASE que o dashboard lê (5.000 CT-es)
+const BASE_ROWS = 6000;   // linhas disponíveis na aba BASE
+
+// Células dos filtros na aba DASH
+const F = {
+  deData: 'DASH!$B$4', ateData: 'DASH!$C$4',
+  dePrazo: 'DASH!$D$4', atePrazo: 'DASH!$E$4',
+  dest: 'DASH!$F$4', rem: 'DASH!$G$4', sit: 'DASH!$H$4',
+  tipo: 'DASH!$I$4', cel: 'DASH!$J$4', cat: 'DASH!$K$4',
+  busca: 'DASH!$L$4'
+};
+
+const COR = { azul: '#1A56DB', azulEscuro: '#1E3A8A', cinza: '#6B7280', fundo: '#F3F4F6',
+              input: '#FEF9C3', branco: '#FFFFFF', texto: '#111827', borda: '#D1D5DB' };
+
+const PALETA = ['#1A56DB', '#0E9F6E', '#F59E0B', '#E02424', '#7E3AF2', '#06B6D4', '#EC4899', '#6B7280'];
+
+/* ------------------------------------------------------------
+ *  MENU
+ * ---------------------------------------------------------- */
+function onOpen() {
+  SpreadsheetApp.getUi().createMenu('📦 Emissões')
+    .addItem('Limpar BASE (antes de colar a nova)', 'limparBase')
+    .addItem('Limpar filtros', 'limparFiltros')
+    .addSeparator()
+    .addItem('Ir para a BASE', 'irParaBase')
+    .addItem('Recriar dashboard (mantém a BASE)', 'criarDashboard')
+    .addToUi();
+}
+
+function limparBase() {
+  const ui = SpreadsheetApp.getUi();
+  const r = ui.alert('Limpar BASE', 'Apaga todo o conteúdo da aba BASE para você colar a planilha nova. Continuar?', ui.ButtonSet.YES_NO);
+  if (r !== ui.Button.YES) return;
+  const base = SpreadsheetApp.getActive().getSheetByName('BASE');
+  base.clear();
+  base.setActiveSelection('A1');
+  SpreadsheetApp.getActive().setActiveSheet(base);
+}
+
+function irParaBase() {
+  const ss = SpreadsheetApp.getActive();
+  ss.setActiveSheet(ss.getSheetByName('BASE'));
+  ss.getSheetByName('BASE').setActiveSelection('A1');
+}
+
+function limparFiltros() {
+  const d = SpreadsheetApp.getActive().getSheetByName('DASH');
+  d.getRange('B4:E4').clearContent();
+  d.getRange('F4:K4').setValue('Todos');
+  d.getRange('L4').clearContent();
+}
+
+/* ------------------------------------------------------------
+ *  CRIAÇÃO DO DASHBOARD
+ * ---------------------------------------------------------- */
+function criarDashboard() {
+  const ss = SpreadsheetApp.getActive();
+  ss.setSpreadsheetTimeZone('America/Bahia');
+  // IMPORTANTE: o setFormula() segue os separadores do idioma da planilha. Em pt_BR a vírgula
+  // vira erro de sintaxe (#ERROR!). Por isso as fórmulas são gravadas com a localidade en_US
+  // e a planilha volta para pt_BR no final (as fórmulas continuam valendo e são exibidas em pt_BR).
+  ss.setSpreadsheetLocale('en_US');
+  SpreadsheetApp.flush();
+  try {
+    construir_(ss);
+  } finally {
+    SpreadsheetApp.flush();
+    ss.setSpreadsheetLocale('pt_BR');
+    SpreadsheetApp.flush();
+  }
+}
+
+function construir_(ss) {
+
+  // 1) Recria as abas (a BASE é preservada)
+  ['DASH', 'DESTINOS', 'COMO USAR', 'DADOS', 'CALC', 'LISTAS'].forEach(n => {
+    const s = ss.getSheetByName(n);
+    if (s) ss.deleteSheet(s);
+  });
+  let base = ss.getSheetByName('BASE');
+  const baseNova = !base;
+  if (baseNova) base = ss.insertSheet('BASE');
+
+  const dash = ss.insertSheet('DASH');
+  const dest = ss.insertSheet('DESTINOS');
+  const como = ss.insertSheet('COMO USAR');
+  const dados = ss.insertSheet('DADOS');
+  const calc = ss.insertSheet('CALC');
+  const listas = ss.insertSheet('LISTAS');
+
+  // Remove a aba padrão vazia, se existir
+  ['Sheet1', 'Página1', 'Planilha1'].forEach(n => {
+    const s = ss.getSheetByName(n);
+    if (s && ss.getSheets().length > 1) ss.deleteSheet(s);
+  });
+
+  garantirLinhas_(base, BASE_ROWS);
+  garantirLinhas_(dados, LAST + 50);
+  garantirLinhas_(dash, 2150);
+  garantirLinhas_(listas, 600);
+  garantirLinhas_(calc, 100);
+
+  if (baseNova) {
+    base.getRange('A1').setValue('⬇ Cole aqui a planilha do sistema, a partir da célula A1 (com o cabeçalho).');
+    base.getRange('A1').setFontWeight('bold').setFontColor(COR.azul);
+  }
+
+  montarDados_(dados);
+  montarListas_(listas);
+  montarCalc_(calc);
+  montarDash_(dash, calc, listas);
+  montarDestinos_(dest);
+  montarComoUsar_(como);
+
+  // Ordem e aparência das abas
+  const ordem = ['DASH', 'DESTINOS', 'BASE', 'COMO USAR', 'DADOS', 'CALC', 'LISTAS'];
+  ordem.forEach((n, i) => { ss.setActiveSheet(ss.getSheetByName(n)); ss.moveActiveSheet(i + 1); });
+  ss.getSheetByName('DASH').setTabColor(COR.azul);
+  ss.getSheetByName('DESTINOS').setTabColor(COR.azul);
+  ss.getSheetByName('BASE').setTabColor('#F59E0B');
+  ['DADOS', 'CALC', 'LISTAS'].forEach(n => ss.getSheetByName(n).setTabColor(COR.cinza));
+  ss.setActiveSheet(ss.getSheetByName('DASH'));
+}
+
+function garantirLinhas_(sheet, n) {
+  const atual = sheet.getMaxRows();
+  if (atual < n) sheet.insertRowsAfter(atual, n - atual);
+}
+
+/* ------------------------------------------------------------
+ *  DADOS — camada de tratamento da BASE
+ *  Cada coluna é UMA fórmula que devolve só as linhas preenchidas
+ *  (assim o QUERY enxerga os tipos de dado corretamente).
+ * ---------------------------------------------------------- */
+function montarDados_(sh) {
+  const b = c => `BASE!$${c}$2:$${c}$${LAST}`;
+  const gateBase = `${b('J')}<>""`;                    // linha tem ID Conhec
+  const gateDados = `$G$2:$G$${LAST}<>""`;
+  const d = c => `$${c}$2:$${c}$${LAST}`;              // coluna da própria aba DADOS
+
+  const data = c => `IFERROR(IF(ISNUMBER(${b(c)}),INT(${b(c)}),DATEVALUE(${b(c)})),"")`;
+  const num0 = c => `IF(${b(c)}="",0,IFERROR(VALUE(${b(c)}),0))`;
+  const txt = c => `TRIM(${b(c)}&"")`;
+
+  // [cabeçalho, expressão, tipo de gate]
+  const cols = [
+    ['Emissão',        data('K'), 'base'],                                                   // A
+    ['Prev. Entrega',  data('L'), 'base'],                                                   // B
+    ['Prazo (dias)',   `IF(${b('O')}="","",IFERROR(VALUE(${b('O')}),""))`, 'base'],          // C
+    ['Destino',        txt('H'), 'base'],                                                    // D
+    ['Destinatário',   txt('Y'), 'base'],                                                    // E
+    ['Remetente',      txt('X'), 'base'],                                                    // F
+    ['ID Conhec',      txt('J'), 'base'],                                                    // G
+    ['NF',             `REGEXREPLACE(TRIM(${b('AA')}&""),"[,;\\s]+$","")`, 'base'],          // H
+    ['AWB',            txt('I'), 'base'],                                                    // I
+    ['Tipo Frete',     txt('S'), 'base'],                                                    // J
+    ['Célula',         `IF(${b('R')}="","(sem célula)",TRIM(${b('R')}&""))`, 'base'],        // K
+    ['Situação CT-e',  `IF(${b('E')}<>"",UPPER(TRIM(${b('E')}&"")),IF(${b('D')}="N","SEM CT-E","SEM RETORNO"))`, 'base'], // L
+    ['Status',         txt('C'), 'base'],                                                    // M
+    ['Situação Prazo', txt('F'), 'base'],                                                    // N
+    ['Categoria',      `IF(${b('AC')}="","(não informada)",TRIM(${b('AC')}&""))`, 'base'],   // O
+    ['Valor Frete',    num0('V'), 'base'],                                                   // P
+    ['Volumes',        num0('W'), 'base'],                                                   // Q
+    ['Modal',          txt('A'), 'base'],                                                    // R
+    ['Origem',         txt('G'), 'base'],                                                    // S
+    ['Rt. Entrega',    txt('N'), 'base'],                                                    // T
+    ['Busca',          `LOWER(${d('G')}&" "&${d('H')}&" "&${d('I')}&" "&${d('E')}&" "&${d('F')}&" "&${d('D')}&" "&${d('T')})`, 'dados'], // U
+    ['Passa filtro',   passaFiltro_(d), 'dados']                                             // V
+  ];
+
+  const headers = cols.map(c => c[0]);
+  sh.getRange(1, 1, 1, headers.length).setValues([headers])
+    .setFontWeight('bold').setBackground(COR.azulEscuro).setFontColor('#FFFFFF');
+
+  cols.forEach((c, i) => {
+    const gate = c[2] === 'base' ? gateBase : gateDados;
+    sh.getRange(2, i + 1).setFormula(`=IFERROR(FILTER(ARRAYFORMULA(${c[1]}),${gate}),"")`);
+  });
+
+  sh.getRange(2, 1, LAST, 2).setNumberFormat('dd/mm/yyyy');
+  sh.getRange(2, 16, LAST, 1).setNumberFormat('#,##0.00');
+  sh.setFrozenRows(1);
+  sh.getRange('X1').setValue('⚠ Aba de tratamento (fórmulas). Não digite nada aqui.').setFontColor(COR.cinza);
+}
+
+// Expressão booleana (linha a linha) que aplica TODOS os filtros da DASH
+function passaFiltro_(d) {
+  const opt = (col, cell) => `(((${cell}="")+(${cell}="Todos")+(${col}=${cell}))>0)`;
+  const faixa = (col, lo, hi) =>
+    `((((${lo}="")*(${hi}=""))+((${col}>=N(${lo}))*(${col}<=IF(${hi}="",99999,${hi}))))>0)`;
+  const partes = [
+    faixa(d('A'), F.deData, F.ateData),
+    faixa(d('C'), F.dePrazo, F.atePrazo),
+    opt(d('D'), F.dest),
+    opt(d('F'), F.rem),
+    opt(d('L'), F.sit),
+    opt(d('J'), F.tipo),
+    opt(d('K'), F.cel),
+    opt(d('O'), F.cat),
+    `(((${F.busca}="")+ISNUMBER(SEARCH(LOWER(${F.busca}&""),${d('U')})))>0)`
+  ];
+  return `(${partes.join('*')})=1`;
+}
+
+/* ------------------------------------------------------------
+ *  LISTAS — opções dos menus suspensos
+ * ---------------------------------------------------------- */
+function montarListas_(sh) {
+  const mk = col => `=IFERROR({"Todos";SORT(UNIQUE(FILTER(DADOS!$${col}$2:$${col}$${LAST},DADOS!$${col}$2:$${col}$${LAST}<>"")))},"Todos")`;
+  const defs = [['A', 'Destino', 'D'], ['B', 'Remetente', 'F'], ['C', 'Situação CT-e', 'L'],
+                ['D', 'Tipo frete', 'J'], ['E', 'Célula', 'K'], ['F', 'Categoria', 'O']];
+  defs.forEach(([col, , src]) => sh.getRange(`${col}1`).setFormula(mk(src)));
+}
+
+/* ------------------------------------------------------------
+ *  CALC — tabelas que alimentam os gráficos
+ * ---------------------------------------------------------- */
+function montarCalc_(sh) {
+  const R = `DADOS!$A$1:$V$${LAST}`;
+  const V = `DADOS!$V$2:$V$${LAST}`;
+  const col = c => `DADOS!$${c}$2:$${c}$${LAST}`;
+  const Q = sel => `=QUERY(${R},"${sel}",1)`;
+
+  // Emissões por dia / Previsão de entrega por dia (rótulo dd/mm + contagem)
+  const porDia = c => `=IFERROR(LET(d,SORT(UNIQUE(FILTER(${col(c)},${V}=TRUE,${col(c)}<>""))),` +
+    `{ARRAYFORMULA(TEXT(d,"dd/mm")),ARRAYFORMULA(COUNTIFS(${col(c)},d,${V},TRUE))}),"")`;
+  sh.getRange('A1:B1').setValues([['Emissão', 'CT-es']]);
+  sh.getRange('A2').setFormula(porDia('A'));
+  sh.getRange('D1:E1').setValues([['Previsão de entrega', 'CT-es']]);
+  sh.getRange('D2').setFormula(porDia('B'));
+
+  sh.getRange('G1').setFormula(Q(
+    "select Col4, count(Col7) where Col22 = true and Col4 <> '' group by Col4 " +
+    "order by count(Col7) desc, Col4 limit 10 label Col4 'Destino', count(Col7) 'CT-es'"));
+  sh.getRange('J1').setFormula(Q(
+    "select Col4, avg(Col3) where Col22 = true and Col4 <> '' and Col3 is not null group by Col4 " +
+    "order by avg(Col3) desc, Col4 limit 10 label Col4 'Destino', avg(Col3) 'Prazo médio (dias)'"));
+  sh.getRange('M1').setFormula(Q(
+    "select Col6, count(Col7) where Col22 = true and Col6 <> '' group by Col6 " +
+    "order by count(Col7) desc, Col6 limit 8 label Col6 'Remetente', count(Col7) 'CT-es'"));
+  sh.getRange('P1').setFormula(Q(
+    "select Col10, count(Col7) where Col22 = true and Col10 <> '' group by Col10 " +
+    "order by count(Col7) desc label Col10 'Tipo de frete', count(Col7) 'CT-es'"));
+  sh.getRange('S1').setFormula(Q(
+    "select Col12, count(Col7) where Col22 = true and Col12 <> '' group by Col12 " +
+    "order by count(Col7) desc label Col12 'Situação CT-e', count(Col7) 'CT-es'"));
+  sh.getRange('V1').setFormula(Q(
+    "select Col11, count(Col7) where Col22 = true and Col11 <> '' group by Col11 " +
+    "order by count(Col7) desc label Col11 'Célula', count(Col7) 'CT-es'"));
+
+  // Faixas de prazo
+  const faixas = [['Até 5 dias', 0, 5], ['6 a 7 dias', 6, 7], ['8 a 9 dias', 8, 9],
+                  ['10 a 12 dias', 10, 12], ['13 a 15 dias', 13, 15], ['16+ dias', 16, 99999]];
+  sh.getRange('Y1:Z1').setValues([['Faixa de prazo', 'CT-es']]);
+  faixas.forEach((f, i) => {
+    sh.getRange(i + 2, 25).setValue(f[0]);
+    sh.getRange(i + 2, 26).setFormula(
+      `=COUNTIFS(${V},TRUE,${col('C')},">=${f[1]}",${col('C')},"<=${f[2]}")`);
+  });
+
+  sh.getRange('A1:Z1').setFontWeight('bold');
+  sh.getRange('A:Z').setFontColor(COR.texto);
+  sh.getRange('A1').setNote('Aba de apoio dos gráficos (fórmulas). Não editar.');
+}
+
+/* ------------------------------------------------------------
+ *  DASH — painel principal
+ * ---------------------------------------------------------- */
+function montarDash_(dash, calc, listas) {
+  const V = `DADOS!$V$2:$V$${LAST}`;
+  const col = c => `DADOS!$${c}$2:$${c}$${LAST}`;
+
+  dash.setHiddenGridlines(true);
+  dash.getRange(1, 1, 2150, 16).setBackground(COR.fundo).setFontColor(COR.texto).setFontFamily('Arial');
+
+  // Larguras (A = margem; B..O = grade; P = margem)
+  const larg = { A: 14, B: 95, C: 100, D: 95, E: 90, F: 90, G: 230, H: 150, I: 80, J: 95, K: 100, L: 70, M: 95, N: 100, O: 90, P: 14 };
+  Object.keys(larg).forEach(k => dash.setColumnWidth(k.charCodeAt(0) - 64, larg[k]));
+  dash.setRowHeights(1, 1, 42);
+  dash.setRowHeights(2, 1, 22);
+  dash.setRowHeights(3, 1, 20);
+  dash.setRowHeights(4, 1, 30);
+  dash.setRowHeights(5, 1, 10);
+  dash.setRowHeights(6, 1, 22);
+  dash.setRowHeights(7, 1, 42);
+  dash.setRowHeights(8, 1, 22);
+  dash.setRowHeights(9, 1, 26);
+
+  // Título e linha de status
+  dash.getRange('B1').setValue('📦 Dashboard de Emissões').setFontSize(22).setFontWeight('bold').setFontColor(COR.azulEscuro);
+  const layoutOk = `AND(BASE!$A$1="Modal",BASE!$H$1="DEST",BASE!$J$1="ID Conhec",BASE!$K$1="DATA",BASE!$L$1="DT. PREV. ENTREGA",` +
+    `BASE!$O$1="PRAZO",BASE!$S$1="TIPO FRETE",BASE!$V$1="VALOR DO FRETE",BASE!$W$1="VOL.",BASE!$X$1="REMETENTE",` +
+    `BASE!$Y$1="DESTINATARIO",BASE!$AA$1="NOTAS")`;
+  dash.getRange('B2').setFormula(
+    `="Base: "&COUNTIF(${col('G')},"?*")&" CT-es  •  Período: "&IF(COUNT(${col('A')})=0,"—",TEXT(MIN(${col('A')}),"dd/mm/yyyy")&" a "&TEXT(MAX(${col('A')}),"dd/mm/yyyy"))` +
+    `&"  •  Filtrados: "&COUNTIF(${V},TRUE)` +
+    `&"  •  "&IF(${layoutOk},"✔ Layout da base reconhecido","⚠ Layout da BASE diferente do esperado — conferir colunas / colar a partir da A1")` +
+    `&IF(COUNTA(BASE!$J$${LAST + 1}:$J$${BASE_ROWS})>0,"  •  ⚠ Base passa de ${LAST - 1} linhas: excedente ignorado","")` +
+    `&IF(COUNTIF(${col('G')},"?*")>COUNT(${col('A')}),"  •  ⚠ "&(COUNTIF(${col('G')},"?*")-COUNT(${col('A')}))&" linha(s) com data inválida","")`);
+  dash.getRange('B2').setFontColor(COR.cinza).setFontSize(10);
+
+  // Painel de filtros
+  const rotulos = ['Emissão de', 'Emissão até', 'Prazo de (dias)', 'Prazo até', 'Destino', 'Remetente',
+                   'Situação CT-e', 'Tipo frete', 'Célula', 'Categoria', 'Buscar: ID / NF / AWB / destinatário'];
+  dash.getRange(3, 2, 1, rotulos.length).setValues([rotulos]).setFontSize(9).setFontColor(COR.cinza).setFontWeight('bold');
+  dash.getRange('L4:O4').merge();
+  dash.getRange('B4:O4').setBackground(COR.input).setFontWeight('bold').setVerticalAlignment('middle')
+    .setBorder(true, true, true, true, true, true, COR.borda, SpreadsheetApp.BorderStyle.SOLID);
+  dash.getRange('F4:K4').setValue('Todos');
+  dash.getRange('B4:E4').setHorizontalAlignment('center');
+  dash.getRange('B4:C4').setNumberFormat('dd/mm/yyyy');
+
+  const dvDate = SpreadsheetApp.newDataValidation().requireDate().setAllowInvalid(false).setHelpText('Informe uma data (dd/mm/aaaa) ou deixe vazio.').build();
+  dash.getRange('B4:C4').setDataValidation(dvDate);
+  const dvNum = SpreadsheetApp.newDataValidation().requireNumberBetween(0, 999).setAllowInvalid(false).setHelpText('Informe o prazo em dias ou deixe vazio.').build();
+  dash.getRange('D4:E4').setDataValidation(dvNum);
+  const lista = (c) => SpreadsheetApp.newDataValidation().requireValueInRange(listas.getRange(`${c}1:${c}600`), true).setAllowInvalid(true).build();
+  dash.getRange('F4').setDataValidation(lista('A'));
+  dash.getRange('G4').setDataValidation(lista('B'));
+  dash.getRange('H4').setDataValidation(lista('C'));
+  dash.getRange('I4').setDataValidation(lista('D'));
+  dash.getRange('J4').setDataValidation(lista('E'));
+  dash.getRange('K4').setDataValidation(lista('F'));
+  dash.setFrozenRows(4);
+
+  // Cartões de indicadores
+  const ct = `COUNTIF(${V},TRUE)`;
+  const cards = [
+    ['CT-es emitidos', `=${ct}`, '#,##0', `="de "&COUNTIF(${col('G')},"?*")&" na base"`],
+    ['Volumes', `=SUMIFS(${col('Q')},${V},TRUE)`, '#,##0', `="média "&IFERROR(ROUND(SUMIFS(${col('Q')},${V},TRUE)/${ct},1),0)&" por CT-e"`],
+    ['Valor de frete', `=SUMIFS(${col('P')},${V},TRUE)`, 'R$ #,##0.00', `="CIF: R$ "&ROUND(SUMIFS(${col('P')},${V},TRUE,${col('J')},"CIF"),0)`],
+    ['Frete médio / CT-e', `=IFERROR(SUMIFS(${col('P')},${V},TRUE)/${ct},0)`, 'R$ #,##0.00', `="maior: R$ "&IFERROR(ROUND(MAXIFS(${col('P')},${V},TRUE),0),0)`],
+    ['Prazo médio (dias)', `=IFERROR(AVERAGEIFS(${col('C')},${V},TRUE),0)`, '0.0', `="mín "&IFERROR(MINIFS(${col('C')},${V},TRUE),"-")&"  •  máx "&IFERROR(MAXIFS(${col('C')},${V},TRUE),"-")`],
+    ['CT-e autorizado', `=IFERROR(COUNTIFS(${V},TRUE,${col('L')},"AUTORIZADO")/${ct},0)`, '0.0%', `=COUNTIFS(${V},TRUE,${col('L')},"AUTORIZADO")&" autorizados"`],
+    ['Pendências de CT-e', `=COUNTIFS(${V},TRUE,${col('L')},"<>AUTORIZADO")`, '#,##0', `="erro: "&COUNTIFS(${V},TRUE,${col('L')},"ERRO")&"  •  sem CT-e: "&COUNTIFS(${V},TRUE,${col('L')},"SEM CT-E")`]
+  ];
+  cards.forEach((c, i) => {
+    const colIdx = 2 + 2 * i;
+    [6, 7, 8].forEach(r => dash.getRange(r, colIdx, 1, 2).merge());
+    const lab = dash.getRange(6, colIdx);
+    const val = dash.getRange(7, colIdx);
+    const sub = dash.getRange(8, colIdx);
+    lab.setValue(c[0]).setFontSize(9).setFontColor(COR.cinza).setFontWeight('bold');
+    val.setFormula(c[1]).setNumberFormat(c[2]).setFontSize(22).setFontWeight('bold').setFontColor(COR.azulEscuro);
+    sub.setFormula(c[3]).setFontSize(9).setFontColor(COR.cinza);
+    const bloco = dash.getRange(6, colIdx, 3, 2);
+    bloco.setBackground(COR.branco).setHorizontalAlignment('center').setVerticalAlignment('middle')
+      .setBorder(true, true, true, true, false, false, COR.borda, SpreadsheetApp.BorderStyle.SOLID);
+  });
+  dash.getRange('N6:O8').setBackground('#FEF2F2');   // cartão de pendências em destaque
+  dash.getRange('N7').setFontColor('#B91C1C');
+
+  dash.getRange('B9').setValue('Gráficos (respondem aos filtros acima)').setFontWeight('bold').setFontColor(COR.azulEscuro).setFontSize(12);
+
+  // Gráficos
+  const W2 = 690, X2 = 705, W3 = 450;
+  graf_(dash, calc, 'A:B', Charts.ChartType.COLUMN, 'Emissões por dia (CT-es)', 10, 0, W2, [PALETA[0]]);
+  graf_(dash, calc, 'G:H', Charts.ChartType.BAR, 'Top 10 destinos (CT-es)', 10, X2, W2, [PALETA[1]]);
+  graf_(dash, calc, 'J:K', Charts.ChartType.COLUMN, 'Destinos com maior prazo médio (dias)', 24, 0, W2, [PALETA[3]]);
+  graf_(dash, calc, 'D:E', Charts.ChartType.COLUMN, 'Previsão de entrega por dia (CT-es)', 24, X2, W2, [PALETA[2]]);
+  graf_(dash, calc, 'P:Q', Charts.ChartType.PIE, 'Tipo de frete', 38, 0, W3, PALETA);
+  graf_(dash, calc, 'S:T', Charts.ChartType.PIE, 'Situação do CT-e', 38, 470, W3, ['#0E9F6E', '#E02424', '#F59E0B', '#6B7280']);
+  graf_(dash, calc, 'Y:Z', Charts.ChartType.COLUMN, 'Distribuição por faixa de prazo', 38, 940, W3, [PALETA[4]]);
+  graf_(dash, calc, 'M:N', Charts.ChartType.BAR, 'Top remetentes (CT-es)', 52, 0, W2, [PALETA[5]]);
+  graf_(dash, calc, 'V:W', Charts.ChartType.COLUMN, 'CT-es por célula', 52, X2, W2, [PALETA[0]]);
+
+  // Detalhamento
+  dash.getRange('B66').setValue('Detalhamento (respeita os filtros — use a busca para localizar ID, NF ou AWB)')
+    .setFontWeight('bold').setFontColor(COR.azulEscuro).setFontSize(12);
+  const sel = "select Col1, Col7, Col8, Col9, Col4, Col5, Col6, Col10, Col2, Col3, Col17, Col16, Col12, Col11 " +
+    "where Col22 = true order by Col1 desc, Col4, Col7 limit 2000 " +
+    "label Col1 'Emissão', Col7 'ID Conhec.', Col8 'NF', Col9 'AWB', Col4 'Destino', Col5 'Destinatário', " +
+    "Col6 'Remetente', Col10 'Tipo frete', Col2 'Prev. entrega', Col3 'Prazo (dias)', Col17 'Vol.', " +
+    "Col16 'Frete (R$)', Col12 'CT-e', Col11 'Célula'";
+  dash.getRange('B67').setFormula(`=IFERROR(QUERY(DADOS!$A$1:$V$${LAST},"${sel}",1),"Nenhum registro para os filtros selecionados")`);
+  dash.getRange('B67:O67').setFontWeight('bold').setBackground(COR.azulEscuro).setFontColor('#FFFFFF');
+  dash.getRange('B68:O2067').setBackground(COR.branco).setFontSize(9);
+  dash.getRange('B68:B2067').setNumberFormat('dd/mm/yyyy');
+  dash.getRange('J68:J2067').setNumberFormat('dd/mm/yyyy');
+  dash.getRange('M68:M2067').setNumberFormat('#,##0.00');
+  dash.getRange('C68:E2067').setHorizontalAlignment('left');
+}
+
+function graf_(dash, calc, faixa, tipo, titulo, linha, offX, largura, cores) {
+  const b = dash.newChart()
+    .setChartType(tipo)
+    .addRange(calc.getRange(faixa))
+    .setNumHeaders(1)
+    .setPosition(linha, 2, offX, 0)
+    .setOption('title', titulo)
+    .setOption('titleTextStyle', { color: COR.texto, fontSize: 13, bold: true })
+    .setOption('width', largura)
+    .setOption('height', 270)
+    .setOption('backgroundColor', COR.branco)
+    .setOption('colors', cores);
+  if (tipo === Charts.ChartType.PIE) {
+    b.setOption('pieHole', 0.5).setOption('legend', { position: 'right' });
+  } else {
+    b.setOption('legend', { position: 'none' });
+  }
+  dash.insertChart(b.build());
+}
+
+/* ------------------------------------------------------------
+ *  DESTINOS — prazo e volume por destino
+ * ---------------------------------------------------------- */
+function montarDestinos_(sh) {
+  sh.setHiddenGridlines(true);
+  sh.getRange('A1').setValue('Prazo e volume por destino').setFontSize(18).setFontWeight('bold').setFontColor(COR.azulEscuro);
+  sh.getRange('A2').setValue('Respeita todos os filtros da aba DASH. Prazo em dias, conforme o sistema.').setFontColor(COR.cinza);
+  const sel = "select Col4, count(Col7), sum(Col17), sum(Col16), avg(Col3), min(Col3), max(Col3) " +
+    "where Col22 = true and Col4 <> '' group by Col4 order by count(Col7) desc, Col4 " +
+    "label Col4 'Destino', count(Col7) 'CT-es', sum(Col17) 'Volumes', sum(Col16) 'Frete (R$)', " +
+    "avg(Col3) 'Prazo médio (dias)', min(Col3) 'Prazo mín.', max(Col3) 'Prazo máx.'";
+  sh.getRange('A4').setFormula(`=IFERROR(QUERY(DADOS!$A$1:$V$${LAST},"${sel}",1),"Nenhum registro")`);
+  sh.getRange('A4:G4').setFontWeight('bold').setBackground(COR.azulEscuro).setFontColor('#FFFFFF');
+  sh.getRange('D5:D600').setNumberFormat('#,##0.00');
+  sh.getRange('E5:E600').setNumberFormat('0.0');
+  sh.setColumnWidth(1, 110);
+  sh.setColumnWidths(2, 6, 120);
+  sh.setFrozenRows(4);
+}
+
+/* ------------------------------------------------------------
+ *  COMO USAR
+ * ---------------------------------------------------------- */
+function montarComoUsar_(sh) {
+  sh.setHiddenGridlines(true);
+  const linhas = [
+    ['COMO USAR'],
+    [''],
+    ['Rotina diária'],
+    ['1. Menu "📦 Emissões" > "Limpar BASE (antes de colar a nova)".'],
+    ['2. Na aba BASE, clique na célula A1 e cole a planilha do sistema (com o cabeçalho). Alternativa: Arquivo > Importar > Fazer upload > "Substituir dados a partir da célula selecionada" com a A1 selecionada.'],
+    ['3. Volte para a DASH. Tudo recalcula sozinho.'],
+    [''],
+    ['Importante'],
+    ['• Nunca exclua linhas ou colunas da BASE — apenas limpe o conteúdo (use o menu). Excluir linhas quebra as fórmulas.'],
+    ['• Não digite nas abas DADOS, CALC e LISTAS: são fórmulas.'],
+    ['• Filtros ficam na linha amarela da DASH. "Todos" ou vazio = sem filtro. Menu "Limpar filtros" volta tudo ao padrão.'],
+    ['• A busca livre procura em ID Conhec, NF, AWB, destinatário, remetente, destino e rota de entrega.'],
+    ['• O dashboard lê até 5.000 linhas. A linha de status no topo da DASH avisa se o layout da base mudar.'],
+    ['• Prazo (dias) é o valor do sistema (coluna PRAZO numérica). A coluna "PRAZO CORRIGIDO" ainda não é usada.']
+  ];
+  sh.getRange(1, 1, linhas.length, 1).setValues(linhas).setWrap(true).setVerticalAlignment('top');
+  sh.setColumnWidth(1, 900);
+  sh.getRange('A1').setFontSize(18).setFontWeight('bold').setFontColor(COR.azulEscuro);
+  ['A3', 'A8'].forEach(a => sh.getRange(a).setFontWeight('bold').setFontColor(COR.azul));
+}
